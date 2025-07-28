@@ -15,5 +15,5 @@ Typical usage
 """
 from . import config, i_o, concepts, metrics, pipeline, tuning, viz
 
-_all_ = ["config", "io", "concepts", "metrics", "pipeline",
+__all__ = ["config", "i_o", "concepts", "metrics", "pipeline",
            "tuning", "viz"]
