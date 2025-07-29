@@ -5,8 +5,23 @@
 from collections.abc import Callable
 import math
 
+# Concept extraction back‑end; see concepts.py
+CONCEPT_METHOD: str = "spacy_noun_chunks"
+CONCEPT_MODEL: str = "en_core_web_sm"  # Fallback to smaller model that's already installed
+INCLUDE_VERBS: bool = True
+MIN_TOKEN_LEN: int = 3
+STOP_CONCEPTS: set = set()
+
+# Semantic similarity
+SBERT_MODEL: str = 'sentence-transformers/all-MiniLM-L6-v2'  # Smaller, more available model
+SEMANTIC_THRESHOLD: float = 0.6   # still used for any binary fallbacks
+
+# Incorporation detection
+LOOKAHEAD_WINDOW: int = 8  # How many turns to look ahead for incorporation
+
 # Novelty vs. shared‑growth weight
 ALPHA: float = 0.7
+BETA: float = 0.5
 
 # Small number to prevent division by zero
 EPS: float = 1e-8
@@ -17,13 +32,6 @@ def default_sigma(x: float) -> float:
     return x / 2.0
 
 SIGMA: Callable[[float], float] = default_sigma
-
-# Concept extraction back‑end; see concepts.py
-CONCEPT_METHOD: str = "spacy_noun_chunks"
-
-# Incorporation detection
-LOOKAHEAD_WINDOW: int = 8  # How many turns to look ahead for incorporation
-SEMANTIC_THRESHOLD: float = 0.5  # Minimum similarity for semantic concept matching (lowered for models without vectors)
 
 # Parallelisation
 BATCH_SIZE: int = 10_000

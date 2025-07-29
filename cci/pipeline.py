@@ -6,11 +6,11 @@ import pandas as pd
 import numpy as np
 import multiprocessing as mp
 from tqdm import tqdm
+from typing import Set
 
 from .concepts import extract_concepts
 from .metrics import (
-    divergence, novel_set, grounded_set,
-    incorporation, shared_growth, cc_turn, semantic_incorporation
+    divergence, incorporation, shared_growth, cc_turn
 )
 from .config import EPS, ALPHA, N_PROCESSES, BATCH_SIZE, LOOKAHEAD_WINDOW
 
@@ -107,45 +107,30 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> tuple[np.ndarray, np.ndarra
                 if len(i_window_turns) == 0:
                     continue  # Skip if no speaker i turns in window
                 
-                # Weight by number of turns from speaker i in window (interaction frequency)
-                weight = len(i_window_turns)
-                    
-                # Reverse to get chronological order
-                i_window_turns.reverse()
-                
-                # Get most recent speaker i turn for divergence calculation
-                most_recent_i_idx = i_window_turns[-1]
-                i_embedding = embeddings[most_recent_i_idx]
-                D_t = divergence(current_embedding, i_embedding)
-                
-                # Collect concepts from speaker i's windowed turns
-                i_windowed_concepts = set()
-                for idx in i_window_turns:
-                    i_windowed_concepts.update(concepts[idx])
-                
-                # Calculate novel concepts (in j's turn but not in i's windowed turns)
+                i_window_embeddings = embeddings[i_window_turns]          # shape (m, dim)
+                D_t = divergence(current_embedding, i_window_embeddings)   # centroid inside
+
+                # ---  concepts sets same as before  ---------------------------------
+                i_windowed_concepts = set().union(*(concepts[idx] for idx in i_window_turns))
                 n_t = current_concepts - i_windowed_concepts
-                
-                # Calculate grounded concepts (intersection with i's windowed concepts)
                 g_t = current_concepts & i_windowed_concepts
-                
-                # Look ahead for incorporation - find next turns by speaker i
-                future_i_concepts = set()
-                look_ahead_limit = min(n_turns, t + LOOKAHEAD_WINDOW + 1)  # Look ahead up to LOOKAHEAD_WINDOW turns
+                # --------------------------------------------------------------------
+
+                # ---- look‑ahead for future‑i concepts identical to earlier code ----
+                future_i_concepts: Set[str] = set()
+                look_ahead_limit = min(n_turns, t + LOOKAHEAD_WINDOW + 1)
                 for future_idx in range(t + 1, look_ahead_limit):
                     if speakers[future_idx] == i_speaker:
                         future_i_concepts.update(concepts[future_idx])
-                
-                # Calculate incorporation and shared growth
+
+                # ---  NEW soft incorporation / shared growth  -----------------------
                 I_tp1 = incorporation(n_t, future_i_concepts)
-                
-                # For shared growth, compare grounding before and after
                 union_context = i_windowed_concepts | current_concepts
                 S_tp1 = shared_growth(g_t, future_i_concepts & current_concepts, union_context)
-                
+
                 cc_score = cc_turn(D_t, I_tp1, S_tp1)
                 cc_scores.append(cc_score)
-                cc_weights.append(weight)
+                cc_weights.append(len(i_window_turns))  # Weight by number of interactions
             
             # Set matrix entry C[j,i] = weighted average CCI score of j building upon i
             if cc_scores:
