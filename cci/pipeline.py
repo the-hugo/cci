@@ -48,7 +48,7 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> tuple[np.ndarray, np.ndarra
     Return k×k CCI matrix and interaction count matrix.
     
     For each speaker pair (j, i), calculates how speaker j builds upon speaker i's
-    contributions by looking at a window of up to 4 previous turns from speaker i
+    contributions by looking at a window of up to n previous turns from speaker i
     when speaker j speaks.
     
     Returns:

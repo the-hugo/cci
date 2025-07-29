@@ -35,4 +35,4 @@ SIGMA: Callable[[float], float] = default_sigma
 
 # Parallelisation
 BATCH_SIZE: int = 10_000
-N_PROCESSES: int | None = None  # None → os.cpu_count()
+N_PROCESSES: int | None = None
