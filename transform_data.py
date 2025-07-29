@@ -20,4 +20,7 @@ data = data.rename(
 # drop all other columns
 data = data[REQUIRED_COLUMNS]
 # save data as data.pkl
+# drop and count all nans
+print(f"Dropped {data.isna().sum().sum()} NaN values")
+data = data.dropna()
 data.to_pickle(r"C:\Users\paul-\Documents\Coding\CCI\data\data.pkl")

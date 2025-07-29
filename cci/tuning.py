@@ -26,7 +26,7 @@ def grid_search(
         # monkey patch config for this iteration
         import cci.config as cfg
         cfg.ALPHA = alpha
-        cfg.SIGMA = sigma_fn  # type: ignore
+        cfg.SIGMA = sigma_fn
 
         cci_scores = compute_cci(df)
         merged = pd.merge(cci_scores, ratings, on="dialogue_id")
