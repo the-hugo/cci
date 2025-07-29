@@ -208,9 +208,8 @@ def _compute_per_dialogue_with_components(dialogue: pd.DataFrame) -> dict:
                 i_window_turns.reverse()
                 
                 # Calculate components
-                most_recent_i_idx = i_window_turns[-1]
-                i_embedding = embeddings[most_recent_i_idx]
-                D_t = divergence(current_embedding, i_embedding)
+                i_window_embeddings = embeddings[i_window_turns]  # (m, dim)
+                D_t = divergence(current_embedding, i_window_embeddings)
                 
                 i_windowed_concepts = set()
                 for idx in i_window_turns:

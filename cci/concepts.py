@@ -74,7 +74,10 @@ def _iter_concepts(doc: Doc) -> Iterable[str]:
         ent_text = ent.text.lower()
         if len(ent_text) >= MIN_TOKEN_LEN:
             yield ent_text
-
+        if " " in ent.text:
+            acronym = "".join(tok[0] for tok in ent.text.split() if tok[0].isalpha())
+            if len(acronym) >= MIN_TOKEN_LEN:
+                yield acronym.lower()
     # ---- 3. verbs capturing actions / processes
     if INCLUDE_VERBS:
         for tok in doc:

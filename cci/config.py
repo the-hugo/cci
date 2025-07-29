@@ -7,7 +7,7 @@ import math
 
 # Concept extraction back‑end; see concepts.py
 CONCEPT_METHOD: str = "spacy_noun_chunks"
-CONCEPT_MODEL: str = "en_core_web_sm"  # Fallback to smaller model that's already installed
+CONCEPT_MODEL: str = "en_core_web_lg"
 INCLUDE_VERBS: bool = True
 MIN_TOKEN_LEN: int = 3
 STOP_CONCEPTS: set = set()
