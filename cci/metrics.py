@@ -2,6 +2,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Set, Dict
 import functools
+import threading
 
 from sentence_transformers import SentenceTransformer  # NEW heavy‑lift
 from .config import EPS, ALPHA, BETA, SIGMA, SEMANTIC_THRESHOLD, SBERT_MODEL
@@ -21,23 +22,33 @@ def divergence(e_t: np.ndarray, e_prev_window: np.ndarray) -> float:
     e_prev_window: expected shape (n, dim) – window of embeddings to compare
                    (caller should supply either 2‑D array or 1‑D single vec)
     """
+    if e_prev_window.size == 0:
+        # No previous embeddings to compare against - return maximum divergence
+        return 1.0
+        
     if e_prev_window.ndim == 1:
         centroid = e_prev_window
     else:
+        if len(e_prev_window) == 0:
+            return 1.0  # No previous embeddings
         centroid = e_prev_window.mean(axis=0)
     return SIGMA(cosine_distance(e_t, centroid))
 
 
 # ------------------------------------------------------------------  semantic similarity (SBERT)
 _EMBEDDER: SentenceTransformer | None = None
+_EMBEDDER_LOCK = threading.Lock()
 
 
 def _get_embedder() -> SentenceTransformer:
     global _EMBEDDER
     if _EMBEDDER is None:
-        _EMBEDDER = SentenceTransformer(
-            SBERT_MODEL or "all-mpnet-base-v2", use_auth_token=False
-        )
+        with _EMBEDDER_LOCK:
+            # Double-check locking pattern
+            if _EMBEDDER is None:
+                _EMBEDDER = SentenceTransformer(
+                    SBERT_MODEL, trust_remote_code=False
+                )
     return _EMBEDDER
 
 
@@ -75,11 +86,27 @@ def incorporation(novel_prev: Set[str], grounded_next: Set[str]) -> float:
 
 # ------------------------------------------------------------------  shared growth (Jaccard gain)
 def shared_growth(g_prev: Set[str], g_next: Set[str], union_prev: Set[str]) -> float:
-    if union_prev:
-        j_prev = len(g_prev) / (len(union_prev) + EPS)
-        j_next = len(g_next) / (len(union_prev) + EPS)
-        return j_next - j_prev
-    return 0.0
+    """
+    Calculate the change in Jaccard similarity representing shared conceptual growth.
+    
+    Args:
+        g_prev: Grounded concepts from previous context
+        g_next: Grounded concepts that appear in future turns  
+        union_prev: Union of all concepts in the previous context
+    
+    Returns:
+        Change in Jaccard similarity (g_next - g_prev) / union_context
+    """
+    if not union_prev:  # Empty context
+        return 0.0
+        
+    union_size = len(union_prev)
+    if union_size == 0:
+        return 0.0
+        
+    j_prev = len(g_prev) / union_size
+    j_next = len(g_next) / union_size
+    return j_next - j_prev
 
 
 # ------------------------------------------------------------------  cc_turn (smoothed product)

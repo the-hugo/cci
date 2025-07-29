@@ -16,7 +16,8 @@ STOP_CONCEPTS: set = set()
 SBERT_MODEL: str = 'sentence-transformers/all-MiniLM-L6-v2'  # Smaller, more available model
 SEMANTIC_THRESHOLD: float = 0.6   # still used for any binary fallbacks
 
-# Incorporation detection
+# Windowing parameters
+LOOKBACK_WINDOW: int = 4   # How many previous turns to look back for divergence calculation
 LOOKAHEAD_WINDOW: int = 8  # How many turns to look ahead for incorporation
 
 # Novelty vs. shared‑growth weight

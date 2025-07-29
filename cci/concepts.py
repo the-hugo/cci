@@ -4,7 +4,7 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 import functools
-import os
+import threading
 from typing import Iterable, Set, List
 
 import spacy
@@ -22,28 +22,34 @@ from .config import (
 # ------------------------------------------------------------------  NLP loader
 _NLP: English | None = None
 _COREF_ENABLED = False
+_NLP_LOCK = threading.Lock()
 
 def _get_nlp() -> English:
     global _NLP, _COREF_ENABLED
     if _NLP is not None:
         return _NLP
 
-    model_name = CONCEPT_MODEL or "en_core_web_lg"
-    try:
-        _NLP = spacy.load(model_name)
-    except OSError as e:
-        raise RuntimeError(
-            f"spaCy model '{model_name}' not installed.\n"
-            f"Run: python -m spacy download {model_name}"
-        ) from e
+    with _NLP_LOCK:
+        # Double-check locking pattern
+        if _NLP is not None:
+            return _NLP
 
-    # -------- optional coreference resolver (silently skip if unavailable)
-    try:
-        import spacy_coref  # type: ignore
-        _NLP.add_pipe("spacy-coref", config={"resolve_text": True})
-        _COREF_ENABLED = True
-    except (ImportError, ValueError):
-        _COREF_ENABLED = False
+        model_name = CONCEPT_MODEL or "en_core_web_lg"
+        try:
+            _NLP = spacy.load(model_name)
+        except OSError as e:
+            raise RuntimeError(
+                f"spaCy model '{model_name}' not installed.\n"
+                f"Run: python -m spacy download {model_name}"
+            ) from e
+
+        # -------- optional coreference resolver (silently skip if unavailable)
+        try:
+            import spacy_coref  # type: ignore
+            _NLP.add_pipe("spacy-coref", config={"resolve_text": True})
+            _COREF_ENABLED = True
+        except (ImportError, ValueError):
+            _COREF_ENABLED = False
 
     return _NLP
 

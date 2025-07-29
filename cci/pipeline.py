@@ -10,7 +10,7 @@ from typing import Set
 
 from .concepts import extract_concepts
 from .metrics import divergence, incorporation, shared_growth, cc_turn
-from .config import EPS, ALPHA, N_PROCESSES, BATCH_SIZE, LOOKAHEAD_WINDOW
+from .config import EPS, ALPHA, N_PROCESSES, BATCH_SIZE, LOOKBACK_WINDOW, LOOKAHEAD_WINDOW
 
 
 # --------------------------------------------------  concept extraction
@@ -31,14 +31,17 @@ def add_concepts_column(df: pd.DataFrame) -> pd.DataFrame:
         df["text"].iloc[i : i + BATCH_SIZE].tolist() for i in range(0, n, BATCH_SIZE)
     ]
 
-    with mp.Pool(processes=N_PROCESSES) as pool:
-        results = list(
-            tqdm(
-                pool.imap(_extract_concepts_worker, batches),
-                total=len(batches),
-                desc="Processing batches",
+    try:
+        with mp.Pool(processes=N_PROCESSES) as pool:
+            results = list(
+                tqdm(
+                    pool.imap(_extract_concepts_worker, batches),
+                    total=len(batches),
+                    desc="Processing batches",
+                )
             )
-        )
+    except Exception as e:
+        raise RuntimeError(f"Multiprocessing failed during concept extraction: {e}")
 
     concepts_flat = [c for batch in results for c in batch]
     df = df.copy()
@@ -53,7 +56,7 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> tuple[np.ndarray, np.ndarra
     Return k×k CCI matrix and interaction count matrix.
 
     For each speaker pair (j, i), calculates how speaker j builds upon speaker i's
-    contributions by looking at a window of up to n previous turns from speaker i
+    contributions by looking at a window of up to LOOKBACK_WINDOW previous turns from speaker i
     when speaker j speaks.
 
     Returns:
@@ -63,17 +66,60 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> tuple[np.ndarray, np.ndarra
     """
     dialogue = dialogue.reset_index(drop=True)
     n_turns = len(dialogue)
-    if n_turns < 5:  # Need at least 5 turns for meaningful windowed calculation
-        return np.array([[0.0]]), np.array([[0]])
-
-    embeddings = np.stack(dialogue["embedding"].to_numpy(), axis=0)
+    
+    # Validate required columns exist
+    required_cols = {"embedding", "concepts", "speaker"}
+    missing_cols = required_cols - set(dialogue.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    # Validate data integrity
+    if n_turns == 0:
+        raise ValueError("Empty dialogue")
+        
+    # Validate embeddings before stacking
+    embeddings_series = dialogue["embedding"]
+    if embeddings_series.isnull().any():
+        raise ValueError("Found null embeddings in dialogue")
+        
+    # Check first embedding to get expected shape
+    first_emb = embeddings_series.iloc[0]
+    if not isinstance(first_emb, np.ndarray):
+        raise TypeError("Embeddings must be numpy arrays")
+    expected_shape = first_emb.shape
+    
+    # Validate all embeddings have consistent shape
+    for i, emb in enumerate(embeddings_series):
+        if emb is None or not isinstance(emb, np.ndarray):
+            raise ValueError(f"Invalid embedding at turn {i}: not a numpy array")
+        if emb.shape != expected_shape:
+            raise ValueError(f"Embedding shape mismatch at turn {i}: expected {expected_shape}, got {emb.shape}")
+    
+    try:
+        embeddings = np.stack(embeddings_series.to_numpy(), axis=0)
+    except Exception as e:
+        raise RuntimeError(f"Failed to stack embeddings: {e}")
+        
     concepts = dialogue["concepts"].tolist()
     speakers = dialogue["speaker"].tolist()
+    
+    # Validate concepts
+    if any(c is None for c in concepts):
+        raise ValueError("Found null concepts in dialogue")
+    if any(not isinstance(c, set) for c in concepts):
+        raise ValueError("All concepts must be sets")
+        
+    # Validate speakers
+    if any(s is None or s == "" for s in speakers):
+        raise ValueError("Found null or empty speaker names in dialogue")
 
     # Get unique speakers and create mapping
     unique_speakers = sorted(list(set(speakers)))
     k = len(unique_speakers)
     speaker_to_idx = {speaker: idx for idx, speaker in enumerate(unique_speakers)}
+    
+    if n_turns < LOOKBACK_WINDOW + 1:  # Need at least LOOKBACK_WINDOW+1 turns for meaningful windowed calculation
+        return np.zeros((k, k)), np.zeros((k, k), dtype=int)
 
     # Initialize k×k CCI matrix and count matrix
     cci_matrix = np.zeros((k, k))
@@ -92,21 +138,21 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> tuple[np.ndarray, np.ndarra
             cc_weights = []
 
             # Find all turns by speaker j
-            for t in range(4, n_turns):
+            for t in range(LOOKBACK_WINDOW, n_turns):
                 if speakers[t] != j_speaker:
                     continue
 
                 current_embedding = embeddings[t]
                 current_concepts = concepts[t]
 
-                # Find window of previous 4 turns from speaker i only
-                window_start = max(0, t - 4)
+                # Find window of previous turns from speaker i only
+                window_start = max(0, t - LOOKBACK_WINDOW)
                 i_window_turns = []
 
                 for idx in range(t - 1, window_start - 1, -1):  # Go backwards from t-1
                     if speakers[idx] == i_speaker:
                         i_window_turns.append(idx)
-                    if len(i_window_turns) >= 4:  # Limit to 4 turns from speaker i
+                    if len(i_window_turns) >= LOOKBACK_WINDOW:  # Limit to configured turns from speaker i
                         break
 
                 if len(i_window_turns) == 0:
@@ -169,16 +215,69 @@ def _compute_per_dialogue_with_components(dialogue: pd.DataFrame) -> dict:
     n_turns = len(dialogue)
     result = {}
 
-    if n_turns < 5:
-        return result
-
-    embeddings = np.stack(dialogue["embedding"].to_numpy(), axis=0)
+    # Validate required columns exist
+    required_cols = {"embedding", "concepts", "speaker"}
+    missing_cols = required_cols - set(dialogue.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    # Validate data integrity
+    if n_turns == 0:
+        raise ValueError("Empty dialogue")
+        
+    # Validate embeddings before stacking
+    embeddings_series = dialogue["embedding"]
+    if embeddings_series.isnull().any():
+        raise ValueError("Found null embeddings in dialogue")
+        
+    # Check first embedding to get expected shape
+    first_emb = embeddings_series.iloc[0]
+    if not isinstance(first_emb, np.ndarray):
+        raise TypeError("Embeddings must be numpy arrays")
+    expected_shape = first_emb.shape
+    
+    # Validate all embeddings have consistent shape
+    for i, emb in enumerate(embeddings_series):
+        if emb is None or not isinstance(emb, np.ndarray):
+            raise ValueError(f"Invalid embedding at turn {i}: not a numpy array")
+        if emb.shape != expected_shape:
+            raise ValueError(f"Embedding shape mismatch at turn {i}: expected {expected_shape}, got {emb.shape}")
+    
+    try:
+        embeddings = np.stack(embeddings_series.to_numpy(), axis=0)
+    except Exception as e:
+        raise RuntimeError(f"Failed to stack embeddings: {e}")
+        
     concepts = dialogue["concepts"].tolist()
     speakers = dialogue["speaker"].tolist()
+    
+    # Validate concepts
+    if any(c is None for c in concepts):
+        raise ValueError("Found null concepts in dialogue")
+    if any(not isinstance(c, set) for c in concepts):
+        raise ValueError("All concepts must be sets")
+        
+    # Validate speakers
+    if any(s is None or s == "" for s in speakers):
+        raise ValueError("Found null or empty speaker names in dialogue")
 
     unique_speakers = sorted(list(set(speakers)))
     k = len(unique_speakers)
     speaker_to_idx = {speaker: idx for idx, speaker in enumerate(unique_speakers)}
+
+    if n_turns < LOOKBACK_WINDOW + 1:
+        # Return empty result for all speaker pairs
+        for j_idx in range(k):
+            for i_idx in range(k):
+                if j_idx != i_idx:
+                    result[(j_idx, i_idx)] = {
+                        "cci_score": 0.0,
+                        "n_interactions": 0,
+                        "D_mean": 0.0, "D_std": 0.0,
+                        "I_mean": 0.0, "I_std": 0.0,
+                        "S_mean": 0.0, "S_std": 0.0
+                    }
+        return result
 
     # For each speaker pair, collect component values
     for j_speaker in unique_speakers:
@@ -198,28 +297,27 @@ def _compute_per_dialogue_with_components(dialogue: pd.DataFrame) -> dict:
             cc_weights = []
 
             # Find all turns by speaker j
-            for t in range(4, n_turns):
+            for t in range(LOOKBACK_WINDOW, n_turns):
                 if speakers[t] != j_speaker:
                     continue
 
                 current_embedding = embeddings[t]
                 current_concepts = concepts[t]
 
-                # Find window of previous 4 turns from speaker i only
-                window_start = max(0, t - 4)
+                # Find window of previous turns from speaker i only
+                window_start = max(0, t - LOOKBACK_WINDOW)
                 i_window_turns = []
 
                 for idx in range(t - 1, window_start - 1, -1):
                     if speakers[idx] == i_speaker:
                         i_window_turns.append(idx)
-                    if len(i_window_turns) >= 4:
+                    if len(i_window_turns) >= LOOKBACK_WINDOW:
                         break
 
                 if len(i_window_turns) == 0:
                     continue
 
                 weight = len(i_window_turns)
-                i_window_turns.reverse()
 
                 # Calculate components
                 i_window_embeddings = embeddings[i_window_turns]  # (m, dim)
@@ -301,14 +399,17 @@ def compute_cci(df: pd.DataFrame) -> pd.DataFrame:
 
     print(f"Computing CCI matrices for {n_dialogues:,} dialogues...")
 
-    with mp.Pool(processes=N_PROCESSES) as pool:
-        results = list(
-            tqdm(
-                pool.imap(_compute_per_dialogue, grouped),
-                total=n_dialogues,
-                desc="Computing CCI",
+    try:
+        with mp.Pool(processes=N_PROCESSES) as pool:
+            results = list(
+                tqdm(
+                    pool.imap(_compute_per_dialogue, grouped),
+                    total=n_dialogues,
+                    desc="Computing CCI",
+                )
             )
-        )
+    except Exception as e:
+        raise RuntimeError(f"Multiprocessing failed during CCI computation: {e}")
 
     # Separate CCI matrices and count matrices
     cci_matrices = [result[0] for result in results]
@@ -339,7 +440,7 @@ def compute_cci(df: pd.DataFrame) -> pd.DataFrame:
                         }
                     )
 
-                    if cci_score != 0:  # Only include non-zero scores in statistics
+                    if abs(cci_score) > EPS:  # Only include non-zero scores in statistics
                         all_cci_scores.append(cci_score)
 
     result_df = pd.DataFrame(speaker_pair_results)
@@ -387,14 +488,17 @@ def compute_cci_with_components(
     print(f"Computing CCI with component analysis for {n_dialogues:,} dialogues...")
 
     if use_multiprocessing and N_PROCESSES != 1:
-        with mp.Pool(processes=N_PROCESSES) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(_compute_per_dialogue_with_components, grouped),
-                    total=n_dialogues,
-                    desc="Computing CCI with components",
+        try:
+            with mp.Pool(processes=N_PROCESSES) as pool:
+                results = list(
+                    tqdm(
+                        pool.imap(_compute_per_dialogue_with_components, grouped),
+                        total=n_dialogues,
+                        desc="Computing CCI with components",
+                    )
                 )
-            )
+        except Exception as e:
+            raise RuntimeError(f"Multiprocessing failed during CCI components computation: {e}")
     else:
         # Single-threaded version for Windows compatibility
         results = list(
