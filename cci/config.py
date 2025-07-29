@@ -21,6 +21,10 @@ SIGMA: Callable[[float], float] = default_sigma
 # Concept extraction back‑end; see concepts.py
 CONCEPT_METHOD: str = "spacy_noun_chunks"
 
+# Incorporation detection
+LOOKAHEAD_WINDOW: int = 8  # How many turns to look ahead for incorporation
+SEMANTIC_THRESHOLD: float = 0.5  # Minimum similarity for semantic concept matching (lowered for models without vectors)
+
 # Parallelisation
 BATCH_SIZE: int = 10_000
 N_PROCESSES: int | None = None  # None → os.cpu_count()

@@ -24,7 +24,7 @@ def load_dialogues(path: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"DataFrame missing columns: {missing}")
 
-    print(f"✓ Data loaded successfully")
+    print(f"Data loaded successfully")
     print(f"  - Total turns: {len(df):,}")
     print(f"  - Unique dialogues: {df['dialogue_id'].nunique():,}")
     print(f"  - Average turns per dialogue: {len(df) / df['dialogue_id'].nunique():.1f}")
@@ -38,5 +38,5 @@ def load_dialogues(path: str) -> pd.DataFrame:
     if not np.issubdtype(df["embedding"].iloc[0].dtype, np.number):
         raise TypeError("embedding column must contain numeric vectors")
     
-    print(f"✓ Data validation complete")
+    print("Data validation complete")
     return df

@@ -10,9 +10,9 @@ from tqdm import tqdm
 from .concepts import extract_concepts
 from .metrics import (
     divergence, novel_set, grounded_set,
-    incorporation, shared_growth, cc_turn
+    incorporation, shared_growth, cc_turn, semantic_incorporation
 )
-from .config import EPS, ALPHA, N_PROCESSES, BATCH_SIZE
+from .config import EPS, ALPHA, N_PROCESSES, BATCH_SIZE, LOOKAHEAD_WINDOW
 
 # --------------------------------------------------  concept extraction
 def _extract_concepts_worker(texts: list[str]) -> list[set[str]]:
@@ -43,22 +43,23 @@ def add_concepts_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # --------------------------------------------------  core computation
-def _compute_per_dialogue(dialogue: pd.DataFrame) -> np.ndarray:
+def _compute_per_dialogue(dialogue: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """
-    Return k×k CCI matrix where C[j,i] is the CCI score of speaker j building upon speaker i.
+    Return k×k CCI matrix and interaction count matrix.
     
     For each speaker pair (j, i), calculates how speaker j builds upon speaker i's
     contributions by looking at a window of up to 4 previous turns from speaker i
     when speaker j speaks.
     
     Returns:
-        np.ndarray: k×k matrix where k is the number of unique speakers
-                   C[j,i] = CCI score of speaker j relative to speaker i
+        tuple: (cci_matrix, count_matrix) where both are k×k matrices
+               cci_matrix[j,i] = weighted CCI score of speaker j relative to speaker i
+               count_matrix[j,i] = number of interactions used for this score
     """
     dialogue = dialogue.reset_index(drop=True)
     n_turns = len(dialogue)
     if n_turns < 5:  # Need at least 5 turns for meaningful windowed calculation
-        return np.array([[0.0]])
+        return np.array([[0.0]]), np.array([[0]])
 
     embeddings = np.stack(dialogue["embedding"].to_numpy(), axis=0)
     concepts = dialogue["concepts"].tolist()
@@ -69,8 +70,9 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> np.ndarray:
     k = len(unique_speakers)
     speaker_to_idx = {speaker: idx for idx, speaker in enumerate(unique_speakers)}
     
-    # Initialize k×k CCI matrix
+    # Initialize k×k CCI matrix and count matrix
     cci_matrix = np.zeros((k, k))
+    count_matrix = np.zeros((k, k), dtype=int)
     
     # For each speaker pair (j, i), calculate CCI score of j building upon i
     for j_speaker in unique_speakers:
@@ -82,6 +84,7 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> np.ndarray:
                 
             i_idx = speaker_to_idx[i_speaker]
             cc_scores = []
+            cc_weights = []
             
             # Find all turns by speaker j
             for t in range(4, n_turns):
@@ -103,6 +106,9 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> np.ndarray:
                 
                 if len(i_window_turns) == 0:
                     continue  # Skip if no speaker i turns in window
+                
+                # Weight by number of turns from speaker i in window (interaction frequency)
+                weight = len(i_window_turns)
                     
                 # Reverse to get chronological order
                 i_window_turns.reverse()
@@ -125,7 +131,7 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> np.ndarray:
                 
                 # Look ahead for incorporation - find next turns by speaker i
                 future_i_concepts = set()
-                look_ahead_limit = min(n_turns, t + 5)  # Look ahead up to 4 turns
+                look_ahead_limit = min(n_turns, t + LOOKAHEAD_WINDOW + 1)  # Look ahead up to LOOKAHEAD_WINDOW turns
                 for future_idx in range(t + 1, look_ahead_limit):
                     if speakers[future_idx] == i_speaker:
                         future_i_concepts.update(concepts[future_idx])
@@ -137,13 +143,139 @@ def _compute_per_dialogue(dialogue: pd.DataFrame) -> np.ndarray:
                 union_context = i_windowed_concepts | current_concepts
                 S_tp1 = shared_growth(g_t, future_i_concepts & current_concepts, union_context)
                 
-                cc_scores.append(cc_turn(D_t, I_tp1, S_tp1))
+                cc_score = cc_turn(D_t, I_tp1, S_tp1)
+                cc_scores.append(cc_score)
+                cc_weights.append(weight)
             
-            # Set matrix entry C[j,i] = average CCI score of j building upon i
+            # Set matrix entry C[j,i] = weighted average CCI score of j building upon i
             if cc_scores:
-                cci_matrix[j_idx, i_idx] = float(np.mean(cc_scores))
+                # Weighted average by interaction frequency
+                weighted_avg = np.average(cc_scores, weights=cc_weights)
+                cci_matrix[j_idx, i_idx] = float(weighted_avg)
+                count_matrix[j_idx, i_idx] = len(cc_scores)
     
-    return cci_matrix
+    return cci_matrix, count_matrix
+
+def _compute_per_dialogue_with_components(dialogue: pd.DataFrame) -> dict:
+    """
+    Return detailed component analysis for each speaker pair.
+    
+    Returns:
+        dict: {(j_idx, i_idx): {'cci_score': float, 'n_interactions': int,
+                               'D_mean': float, 'D_std': float,
+                               'I_mean': float, 'I_std': float, 
+                               'S_mean': float, 'S_std': float}}
+    """
+    dialogue = dialogue.reset_index(drop=True)
+    n_turns = len(dialogue)
+    result = {}
+    
+    if n_turns < 5:
+        return result
+
+    embeddings = np.stack(dialogue["embedding"].to_numpy(), axis=0)
+    concepts = dialogue["concepts"].tolist()
+    speakers = dialogue["speaker"].tolist()
+
+    unique_speakers = sorted(list(set(speakers)))
+    k = len(unique_speakers)
+    speaker_to_idx = {speaker: idx for idx, speaker in enumerate(unique_speakers)}
+    
+    # For each speaker pair, collect component values
+    for j_speaker in unique_speakers:
+        j_idx = speaker_to_idx[j_speaker]
+        
+        for i_speaker in unique_speakers:
+            if j_speaker == i_speaker:
+                continue
+                
+            i_idx = speaker_to_idx[i_speaker]
+            
+            # Collect all component values for this speaker pair
+            D_values = []
+            I_values = []
+            S_values = []
+            cc_scores = []
+            cc_weights = []
+            
+            # Find all turns by speaker j
+            for t in range(4, n_turns):
+                if speakers[t] != j_speaker:
+                    continue
+                    
+                current_embedding = embeddings[t]
+                current_concepts = concepts[t]
+                
+                # Find window of previous 4 turns from speaker i only
+                window_start = max(0, t - 4)
+                i_window_turns = []
+                
+                for idx in range(t - 1, window_start - 1, -1):
+                    if speakers[idx] == i_speaker:
+                        i_window_turns.append(idx)
+                    if len(i_window_turns) >= 4:
+                        break
+                
+                if len(i_window_turns) == 0:
+                    continue
+                
+                weight = len(i_window_turns)
+                i_window_turns.reverse()
+                
+                # Calculate components
+                most_recent_i_idx = i_window_turns[-1]
+                i_embedding = embeddings[most_recent_i_idx]
+                D_t = divergence(current_embedding, i_embedding)
+                
+                i_windowed_concepts = set()
+                for idx in i_window_turns:
+                    i_windowed_concepts.update(concepts[idx])
+                
+                n_t = current_concepts - i_windowed_concepts
+                g_t = current_concepts & i_windowed_concepts
+                
+                future_i_concepts = set()
+                look_ahead_limit = min(n_turns, t + LOOKAHEAD_WINDOW + 1)
+                for future_idx in range(t + 1, look_ahead_limit):
+                    if speakers[future_idx] == i_speaker:
+                        future_i_concepts.update(concepts[future_idx])
+                
+                I_tp1 = incorporation(n_t, future_i_concepts)
+                union_context = i_windowed_concepts | current_concepts
+                S_tp1 = shared_growth(g_t, future_i_concepts & current_concepts, union_context)
+                
+                # Store component values
+                D_values.append(D_t)
+                I_values.append(I_tp1)
+                S_values.append(S_tp1)
+                
+                cc_score = cc_turn(D_t, I_tp1, S_tp1)
+                cc_scores.append(cc_score)
+                cc_weights.append(weight)
+            
+            # Calculate statistics
+            if cc_scores:
+                weighted_avg = np.average(cc_scores, weights=cc_weights)
+                result[(j_idx, i_idx)] = {
+                    'cci_score': float(weighted_avg),
+                    'n_interactions': len(cc_scores),
+                    'D_mean': float(np.mean(D_values)),
+                    'D_std': float(np.std(D_values)) if len(D_values) > 1 else 0.0,
+                    'I_mean': float(np.mean(I_values)),
+                    'I_std': float(np.std(I_values)) if len(I_values) > 1 else 0.0,
+                    'S_mean': float(np.mean(S_values)),
+                    'S_std': float(np.std(S_values)) if len(S_values) > 1 else 0.0
+                }
+            else:
+                result[(j_idx, i_idx)] = {
+                    'cci_score': 0.0,
+                    'n_interactions': 0,
+                    'D_mean': 0.0, 'D_std': 0.0,
+                    'I_mean': 0.0, 'I_std': 0.0,
+                    'S_mean': 0.0, 'S_std': 0.0
+                }
+    
+    return result
 
 def compute_cci(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -166,17 +298,21 @@ def compute_cci(df: pd.DataFrame) -> pd.DataFrame:
     print(f"Computing CCI matrices for {n_dialogues:,} dialogues...")
     
     with mp.Pool(processes=N_PROCESSES) as pool:
-        cci_matrices = list(tqdm(
+        results = list(tqdm(
             pool.imap(_compute_per_dialogue, grouped),
             total=n_dialogues,
             desc="Computing CCI"
         ))
+    
+    # Separate CCI matrices and count matrices
+    cci_matrices = [result[0] for result in results]
+    count_matrices = [result[1] for result in results]
 
     # Flatten matrices into speaker pair results
     speaker_pair_results = []
     all_cci_scores = []
     
-    for group, matrix in zip(grouped, cci_matrices):
+    for group, matrix, count_matrix in zip(grouped, cci_matrices, count_matrices):
         dialogue_id = group["dialogue_id"].iloc[0]
         speakers = sorted(list(set(group["speaker"].tolist())))
         
@@ -185,17 +321,7 @@ def compute_cci(df: pd.DataFrame) -> pd.DataFrame:
             for i_idx, to_speaker in enumerate(speakers):
                 if j_idx != i_idx:  # Skip self-interactions
                     cci_score = matrix[j_idx, i_idx]
-                    
-                    # Count number of interactions for this speaker pair
-                    n_interactions = 0
-                    for t in range(4, len(group)):
-                        if group.iloc[t]['speaker'] == from_speaker:
-                            # Check if to_speaker appears in the 4-turn window
-                            window_start = max(0, t - 4)
-                            for idx in range(t - 1, window_start - 1, -1):
-                                if group.iloc[idx]['speaker'] == to_speaker:
-                                    n_interactions += 1
-                                    break  # Count each from_speaker turn only once
+                    n_interactions = int(count_matrix[j_idx, i_idx])
                     
                     speaker_pair_results.append({
                         'dialogue_id': dialogue_id,
@@ -222,4 +348,70 @@ def compute_cci(df: pd.DataFrame) -> pd.DataFrame:
     else:
         print("SUCCESS: CCI computation complete (no non-zero scores found)")
     
+    return result_df.sort_values(['dialogue_id', 'CCI_score'], ascending=[True, False]).reset_index(drop=True)
+
+def compute_cci_with_components(df: pd.DataFrame, use_multiprocessing: bool = True) -> pd.DataFrame:
+    """
+    Return CCI scores with component breakdown for diagnostic analysis.
+    
+    Args:
+        df: Input DataFrame with dialogue data
+        use_multiprocessing: Whether to use multiprocessing (disable on Windows if issues)
+    
+    Returns:
+        pd.DataFrame with additional columns:
+        - D_mean, D_std: Divergence component statistics
+        - I_mean, I_std: Incorporation component statistics  
+        - S_mean, S_std: Shared growth component statistics
+        - component_counts: Number of turns used for each component
+    """
+    df = add_concepts_column(df)
+
+    # Run per dialogue with optional multiprocessing
+    grouped = [g for _, g in df.groupby("dialogue_id", sort=True)]
+    n_dialogues = len(grouped)
+    
+    print(f"Computing CCI with component analysis for {n_dialogues:,} dialogues...")
+    
+    if use_multiprocessing and N_PROCESSES != 1:
+        with mp.Pool(processes=N_PROCESSES) as pool:
+            results = list(tqdm(
+                pool.imap(_compute_per_dialogue_with_components, grouped),
+                total=n_dialogues,
+                desc="Computing CCI with components"
+            ))
+    else:
+        # Single-threaded version for Windows compatibility
+        results = list(tqdm(
+            (_compute_per_dialogue_with_components(g) for g in grouped),
+            total=n_dialogues,
+            desc="Computing CCI with components (single-threaded)"
+        ))
+    
+    speaker_pair_results = []
+    
+    for group, result in zip(grouped, results):
+        dialogue_id = group["dialogue_id"].iloc[0]
+        speakers = sorted(list(set(group["speaker"].tolist())))
+        
+        for j_idx, from_speaker in enumerate(speakers):
+            for i_idx, to_speaker in enumerate(speakers):
+                if j_idx != i_idx:
+                    data = result[(j_idx, i_idx)]
+                    
+                    speaker_pair_results.append({
+                        'dialogue_id': dialogue_id,
+                        'from_speaker': from_speaker,
+                        'to_speaker': to_speaker,
+                        'CCI_score': data['cci_score'],
+                        'n_interactions': data['n_interactions'],
+                        'D_mean': data['D_mean'],
+                        'D_std': data['D_std'],
+                        'I_mean': data['I_mean'], 
+                        'I_std': data['I_std'],
+                        'S_mean': data['S_mean'],
+                        'S_std': data['S_std']
+                    })
+    
+    result_df = pd.DataFrame(speaker_pair_results)
     return result_df.sort_values(['dialogue_id', 'CCI_score'], ascending=[True, False]).reset_index(drop=True)
